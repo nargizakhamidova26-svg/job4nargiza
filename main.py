@@ -28,7 +28,7 @@ MIN_SCORE = 7
 SEEN_FILE = Path("data/seen_jobs.json")
 MODEL = "claude-haiku-4-5-20251001"
 
-RELIEFWEB_URL = "https://api.reliefweb.int/v1/jobs"
+RELIEFWEB_URL = "https://api.reliefweb.int/v2/jobs"
 APP_NAME = "job4nargiza"
 JOBS_PER_FETCH = 100
 
