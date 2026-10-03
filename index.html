@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Job tracker — Nargiza</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --card: #1a1d24;
+    --card-hover: #22262f;
+    --border: #2a2f3a;
+    --text: #e8ebf0;
+    --muted: #8b94a3;
+    --accent: #6aa5ff;
+    --applied: #4ade80;
+    --interested: #fbbf24;
+    --skipped: #64748b;
+    --new: #6aa5ff;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f5f6f8;
+      --card: #ffffff;
+      --card-hover: #f0f2f5;
+      --border: #e2e5eb;
+      --text: #1a1d24;
+      --muted: #5a6271;
+      --accent: #2563eb;
+    }
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+    padding: 16px;
+    max-width: 900px;
+    margin: 0 auto;
+  }
+  header { margin-bottom: 20px; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .meta { color: var(--muted); font-size: 13px; }
+  .tabs {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    margin: 16px 0;
+    padding-bottom: 4px;
+    scrollbar-width: thin;
+  }
+  .tab {
+    background: var(--card);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 14px;
+    border-radius: 20px;
+    font-size: 14px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.15s;
+  }
+  .tab:hover { background: var(--card-hover); }
+  .tab.active { background: var(--accent); color: white; border-color: var(--accent); }
+  .count {
+    background: rgba(255,255,255,0.15);
+    padding: 1px 7px;
+    border-radius: 10px;
+    font-size: 12px;
+    margin-left: 4px;
+  }
+  .tab:not(.active) .count { background: var(--border); color: var(--muted); }
+  .cards { display: flex; flex-direction: column; gap: 12px; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px;
+    position: relative;
+  }
+  .card-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+  .title {
+    font-weight: 600;
+    font-size: 16px;
+    flex: 1;
+  }
+  .score {
+    background: var(--accent);
+    color: white;
+    padding: 2px 8px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .field { font-size: 14px; color: var(--muted); margin-bottom: 3px; }
+  .field strong { color: var(--text); font-weight: 500; }
+  .reason {
+    font-size: 13px;
+    color: var(--text);
+    background: var(--bg);
+    padding: 8px 10px;
+    border-radius: 6px;
+    margin: 8px 0;
+    border-left: 3px solid var(--accent);
+  }
+  .actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 10px;
+    flex-wrap: wrap;
+  }
+  .btn {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .btn:hover { background: var(--card-hover); }
+  .btn.active-applied { background: var(--applied); color: #0b1a0f; border-color: var(--applied); font-weight: 600; }
+  .btn.active-interested { background: var(--interested); color: #1a1200; border-color: var(--interested); font-weight: 600; }
+  .btn.active-skipped { background: var(--skipped); color: white; border-color: var(--skipped); font-weight: 600; }
+  .btn.open { margin-left: auto; background: var(--accent); color: white; border-color: var(--accent); text-decoration: none; }
+  .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+  .status-dot.applied { background: var(--applied); }
+  .status-dot.interested { background: var(--interested); }
+  .status-dot.skipped { background: var(--skipped); }
+  .status-dot.new { background: var(--new); }
+  .empty {
+    text-align: center;
+    color: var(--muted);
+    padding: 40px 20px;
+    font-size: 14px;
+  }
+  footer {
+    margin-top: 30px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 12px;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Job tracker</h1>
+  <div class="meta" id="meta">Loading…</div>
+</header>
+
+<div class="tabs" id="tabs"></div>
+<div class="cards" id="cards"></div>
+
+<footer>
+  Status saved locally in your browser · Updates daily from GitHub Actions
+</footer>
+
+<script>
+  const STORAGE_KEY = 'job4nargiza_status_v1';
+  let jobs = [];
+  let currentFilter = 'new';
+
+  function loadStatuses() {
+    try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {}; }
+    catch { return {}; }
+  }
+  function saveStatus(url, status) {
+    const all = loadStatuses();
+    if (status === null) delete all[url];
+    else all[url] = status;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(all));
+  }
+
+  function statusOf(url) {
+    return loadStatuses()[url] || 'new';
+  }
+
+  function render() {
+    const statuses = loadStatuses();
+    const counts = { all: jobs.length, new: 0, applied: 0, interested: 0, skipped: 0 };
+    jobs.forEach(j => {
+      const s = statuses[j.url] || 'new';
+      counts[s] = (counts[s] || 0) + 1;
+    });
+
+    // Tabs
+    const tabsEl = document.getElementById('tabs');
+    const tabs = [
+      { key: 'new',        label: 'New' },
+      { key: 'interested', label: 'Interested' },
+      { key: 'applied',    label: 'Applied' },
+      { key: 'skipped',    label: 'Skipped' },
+      { key: 'all',        label: 'All' },
+    ];
+    tabsEl.innerHTML = tabs.map(t =>
+      `<button class="tab ${t.key === currentFilter ? 'active' : ''}" data-filter="${t.key}">
+        ${t.label}<span class="count">${counts[t.key] || 0}</span>
+      </button>`
+    ).join('');
+    tabsEl.querySelectorAll('.tab').forEach(b => {
+      b.addEventListener('click', () => {
+        currentFilter = b.dataset.filter;
+        render();
+      });
+    });
+
+    // Cards
+    const filtered = currentFilter === 'all'
+      ? jobs
+      : jobs.filter(j => (statuses[j.url] || 'new') === currentFilter);
+
+    const cardsEl = document.getElementById('cards');
+    if (filtered.length === 0) {
+      cardsEl.innerHTML = `<div class="empty">No jobs in this category yet.</div>`;
+      return;
+    }
+
+    cardsEl.innerHTML = filtered.map(j => {
+      const status = statuses[j.url] || 'new';
+      return `
+        <div class="card">
+          <div class="card-head">
+            <div class="title">
+              <span class="status-dot ${status}"></span>${escape(j.title || 'Untitled')}
+            </div>
+            <span class="score">${j.score || '?'}/10</span>
+          </div>
+          <div class="field"><strong>Organization:</strong> ${escape(j.organization || 'Not specified')}</div>
+          <div class="field"><strong>Location:</strong> ${escape(j.location || 'Not specified')}</div>
+          <div class="field"><strong>Deadline:</strong> ${escape(j.deadline || 'Not specified')}</div>
+          <div class="field"><strong>Found:</strong> ${escape(j.found_date || 'Unknown')}</div>
+          ${j.reason ? `<div class="reason">${escape(j.reason)}</div>` : ''}
+          <div class="actions">
+            <button class="btn ${status === 'applied' ? 'active-applied' : ''}" data-url="${escape(j.url)}" data-status="applied">✓ Applied</button>
+            <button class="btn ${status === 'interested' ? 'active-interested' : ''}" data-url="${escape(j.url)}" data-status="interested">★ Interested</button>
+            <button class="btn ${status === 'skipped' ? 'active-skipped' : ''}" data-url="${escape(j.url)}" data-status="skipped">✗ Skipped</button>
+            <a class="btn open" href="${escape(j.url)}" target="_blank" rel="noopener">Open ↗</a>
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    cardsEl.querySelectorAll('button[data-url]').forEach(b => {
+      b.addEventListener('click', () => {
+        const url = b.dataset.url;
+        const newStatus = b.dataset.status;
+        const current = statusOf(url);
+        saveStatus(url, current === newStatus ? null : newStatus);
+        render();
+      });
+    });
+  }
+
+  function escape(s) {
+    return String(s || '').replace(/[&<>"']/g, c => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c]));
+  }
+
+  fetch('data/jobs.json?' + Date.now())
+    .then(r => r.ok ? r.json() : [])
+    .then(data => {
+      jobs = Array.isArray(data) ? data : [];
+      document.getElementById('meta').textContent =
+        `${jobs.length} tracked jobs · last loaded ${new Date().toLocaleString()}`;
+      render();
+    })
+    .catch(e => {
+      document.getElementById('meta').textContent =
+        'Could not load jobs.json. Has the scraper run yet?';
+      render();
+    });
+</script>
+</body>
+</html>

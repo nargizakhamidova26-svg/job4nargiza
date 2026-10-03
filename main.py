@@ -27,6 +27,7 @@ ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 
 MIN_SCORE = 5
 SEEN_FILE = Path("data/seen_jobs.json")
+JOBS_FILE = Path("docs/data/jobs.json")  # served by GitHub Pages
 MODEL = "claude-haiku-4-5-20251001"
 
 UNJOBS_URL = "https://unjobs.org/new"
@@ -388,6 +389,29 @@ def send_summary(total_raw, total_new, total_matched):
 # Main
 # -------------------------------------------------------------
 
+def append_to_dashboard(matches):
+    """Append new matches to docs/data/jobs.json for the dashboard."""
+    JOBS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if JOBS_FILE.exists():
+        existing = json.loads(JOBS_FILE.read_text() or "[]")
+    else:
+        existing = []
+
+    existing_urls = {j.get("url", "") for j in existing}
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+
+    for m in matches:
+        if m.get("url") and m["url"] not in existing_urls:
+            m["found_date"] = today
+            existing.append(m)
+            existing_urls.add(m["url"])
+
+    # Keep newest-first
+    existing.sort(key=lambda j: j.get("found_date", ""), reverse=True)
+    JOBS_FILE.write_text(json.dumps(existing, indent=2, ensure_ascii=False))
+    log(f"[dashboard] {len(existing)} total tracked jobs")
+
+
 def main():
     seen = load_seen()
     log(f"[main] seen store has {len(seen)} URLs")
@@ -400,6 +424,8 @@ def main():
 
     for job in matches:
         send_telegram(job)
+
+    append_to_dashboard(matches)
 
     for job in new:
         if job["url"]:
