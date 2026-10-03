@@ -164,9 +164,9 @@ Each object MUST include ALL fields (use "Not specified" ONLY if truly absent):
 Return [] if no matches. Return ONLY the JSON array, no other text.
 """
 
-FILTER_PROMPT = FILTER_PROMPT_TEMPLATE.format(
-    candidate_profile=CANDIDATE_PROFILE or
-    "[No profile configured — set CANDIDATE_PROFILE env var]"
+FILTER_PROMPT = FILTER_PROMPT_TEMPLATE.replace(
+    "{candidate_profile}",
+    CANDIDATE_PROFILE or "[No profile configured — set CANDIDATE_PROFILE env var]"
 )
 
 # -------------------------------------------------------------
