@@ -1,7 +1,8 @@
 """
 Daily job scraper for Nargiza Khamidova.
-Scrapes philanthropy and development sector job sites,
-filters through Claude Haiku, sends matches to Telegram.
+Uses ReliefWeb's public API to pull UN agency, NGO, and
+foundation job postings, filters through Claude Haiku,
+sends matches to Telegram.
 """
 
 import json
@@ -13,7 +14,6 @@ from pathlib import Path
 
 import requests
 from anthropic import Anthropic
-from bs4 import BeautifulSoup
 
 # -------------------------------------------------------------
 # Config
@@ -27,13 +27,12 @@ MIN_SCORE = 7
 SEEN_FILE = Path("data/seen_jobs.json")
 MODEL = "claude-haiku-4-5-20251001"
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    )
-}
+# ReliefWeb API: free, public, no key needed. Just pass an appname.
+RELIEFWEB_URL = "https://api.reliefweb.int/v1/jobs"
+APP_NAME = "job4nargiza"
+JOBS_PER_FETCH = 100  # pull newest 100 per daily run
+
+HEADERS = {"User-Agent": f"{APP_NAME}/1.0"}
 
 # -------------------------------------------------------------
 # Filter prompt
@@ -101,6 +100,8 @@ EXCLUDE
 - Roles requiring Spanish or French as required language
 - Fundraising-only or communications-only roles
 - Climate science / health science research roles
+- Humanitarian field roles in active conflict zones
+- Driver, admin assistant, support staff roles
 
 SCORING RUBRIC
 
@@ -132,49 +133,84 @@ Return [] if no matches. Return ONLY the JSON array, no other text.
 """
 
 # -------------------------------------------------------------
-# Scraper - Devex
+# Scraper - ReliefWeb API
 # -------------------------------------------------------------
 
-def scrape_devex():
-    """Scrape recent job listings from Devex."""
-    url = "https://www.devex.com/jobs"
+def scrape_reliefweb():
+    """Pull recent jobs from ReliefWeb API (UN, NGO, foundation)."""
     jobs = []
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=30)
+        params = {
+            "appname": APP_NAME,
+            "profile": "list",
+            "limit": JOBS_PER_FETCH,
+            "sort[]": "date.created:desc",
+            "fields[include][]": [
+                "title",
+                "url",
+                "source.name",
+                "country.name",
+                "city.name",
+                "date.closing",
+                "date.created",
+                "experience.name",
+                "career_categories.name",
+            ],
+        }
+        resp = requests.get(RELIEFWEB_URL, params=params,
+                            headers=HEADERS, timeout=30)
         resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
+        payload = resp.json()
 
-        # Devex job cards - adjust selector if page changes
-        cards = soup.select("article") or soup.select("[class*='job']")
-        for card in cards[:50]:
-            title_el = card.find(["h2", "h3", "a"])
-            if not title_el:
-                continue
-            title = title_el.get_text(strip=True)
-            if not title or len(title) < 5:
+        for item in payload.get("data", []):
+            f = item.get("fields", {})
+
+            title = f.get("title", "").strip()
+            if not title:
                 continue
 
-            link_el = card.find("a", href=True)
-            link = link_el["href"] if link_el else ""
-            if link and not link.startswith("http"):
-                link = "https://www.devex.com" + link
+            orgs = [s.get("name", "") for s in f.get("source", [])]
+            org = ", ".join(orgs)[:120]
 
-            text = card.get_text(" ", strip=True)[:500]
+            countries = [c.get("name", "") for c in f.get("country", [])]
+            cities = [c.get("name", "") for c in f.get("city", [])]
+            location = ", ".join(cities + countries)[:120]
+
+            deadline = ""
+            date_obj = f.get("date", {})
+            if isinstance(date_obj, dict) and date_obj.get("closing"):
+                deadline = date_obj["closing"][:10]
+
+            experience = ""
+            exp_obj = f.get("experience", [])
+            if exp_obj:
+                experience = ", ".join(e.get("name", "") for e in exp_obj)
+
+            categories = ""
+            cat_obj = f.get("career_categories", [])
+            if cat_obj:
+                categories = ", ".join(c.get("name", "") for c in cat_obj)
+
+            # Build description from the structured bits ReliefWeb gives
+            description = (
+                f"Experience: {experience}. "
+                f"Category: {categories}. "
+                f"Location: {location}."
+            )
 
             jobs.append({
                 "title": title,
-                "organization": "",
-                "location": "",
-                "deadline": "",
-                "description": text,
-                "url": link,
-                "source": "devex",
+                "organization": org,
+                "location": location,
+                "deadline": deadline,
+                "description": description,
+                "url": f.get("url", ""),
+                "source": "reliefweb",
             })
     except Exception as e:
-        print(f"[devex] scrape failed: {e}", file=sys.stderr)
-    print(f"[devex] found {len(jobs)} raw jobs")
+        print(f"[reliefweb] fetch failed: {e}", file=sys.stderr)
+    print(f"[reliefweb] fetched {len(jobs)} raw jobs")
     return jobs
-
 
 # -------------------------------------------------------------
 # Dedup
@@ -205,7 +241,6 @@ def filter_with_claude(jobs):
     client = Anthropic(api_key=ANTHROPIC_API_KEY)
     matches = []
 
-    # Process in batches of 20 to keep responses parseable
     for i in range(0, len(jobs), 20):
         batch = jobs[i:i + 20]
         payload = json.dumps(
@@ -230,7 +265,6 @@ def filter_with_claude(jobs):
                 }],
             )
             text = msg.content[0].text.strip()
-            # Strip code fences if Claude wrapped the JSON
             text = re.sub(r"^```(?:json)?|```$", "", text,
                           flags=re.MULTILINE).strip()
             parsed = json.loads(text)
@@ -301,7 +335,7 @@ def send_summary(total_raw, total_new, total_matched):
 
 def main():
     seen = load_seen()
-    raw = scrape_devex()
+    raw = scrape_reliefweb()
     new = filter_unseen(raw, seen)
     print(f"[main] {len(new)} new jobs after dedup")
 
@@ -310,8 +344,6 @@ def main():
     for job in matches:
         send_telegram(job)
 
-    # Mark all new URLs as seen (even non-matches) so we don't
-    # re-filter them tomorrow.
     for job in new:
         if job["url"]:
             seen.add(job["url"])
