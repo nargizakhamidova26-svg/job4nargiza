@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sys
+import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -27,12 +28,21 @@ MIN_SCORE = 7
 SEEN_FILE = Path("data/seen_jobs.json")
 MODEL = "claude-haiku-4-5-20251001"
 
-# ReliefWeb API: free, public, no key needed. Just pass an appname.
 RELIEFWEB_URL = "https://api.reliefweb.int/v1/jobs"
 APP_NAME = "job4nargiza"
-JOBS_PER_FETCH = 100  # pull newest 100 per daily run
+JOBS_PER_FETCH = 100
 
-HEADERS = {"User-Agent": f"{APP_NAME}/1.0"}
+HEADERS = {
+    "User-Agent": f"{APP_NAME}/1.0",
+    "Accept": "application/json",
+}
+
+# collect diagnostic messages to send to Telegram at the end
+DIAGNOSTICS = []
+
+def log(msg):
+    print(msg)
+    DIAGNOSTICS.append(msg)
 
 # -------------------------------------------------------------
 # Filter prompt
@@ -133,19 +143,18 @@ Return [] if no matches. Return ONLY the JSON array, no other text.
 """
 
 # -------------------------------------------------------------
-# Scraper - ReliefWeb API
+# Scraper - ReliefWeb API (POST with JSON body)
 # -------------------------------------------------------------
 
 def scrape_reliefweb():
-    """Pull recent jobs from ReliefWeb API (UN, NGO, foundation)."""
+    """Pull recent jobs from ReliefWeb API using POST + JSON body."""
     jobs = []
-    try:
-        params = {
-            "appname": APP_NAME,
-            "profile": "list",
-            "limit": JOBS_PER_FETCH,
-            "sort[]": "date.created:desc",
-            "fields[include][]": [
+
+    body = {
+        "limit": JOBS_PER_FETCH,
+        "sort": ["date.created:desc"],
+        "fields": {
+            "include": [
                 "title",
                 "url",
                 "source.name",
@@ -155,12 +164,27 @@ def scrape_reliefweb():
                 "date.created",
                 "experience.name",
                 "career_categories.name",
-            ],
-        }
-        resp = requests.get(RELIEFWEB_URL, params=params,
-                            headers=HEADERS, timeout=30)
-        resp.raise_for_status()
+            ]
+        },
+    }
+
+    try:
+        resp = requests.post(
+            f"{RELIEFWEB_URL}?appname={APP_NAME}",
+            json=body,
+            headers=HEADERS,
+            timeout=30,
+        )
+        log(f"[reliefweb] HTTP {resp.status_code}")
+
+        if resp.status_code != 200:
+            log(f"[reliefweb] body: {resp.text[:300]}")
+            return jobs
+
         payload = resp.json()
+        total = payload.get("totalCount", 0)
+        count = payload.get("count", 0)
+        log(f"[reliefweb] API returned count={count} total={total}")
 
         for item in payload.get("data", []):
             f = item.get("fields", {})
@@ -191,7 +215,6 @@ def scrape_reliefweb():
             if cat_obj:
                 categories = ", ".join(c.get("name", "") for c in cat_obj)
 
-            # Build description from the structured bits ReliefWeb gives
             description = (
                 f"Experience: {experience}. "
                 f"Category: {categories}. "
@@ -208,8 +231,10 @@ def scrape_reliefweb():
                 "source": "reliefweb",
             })
     except Exception as e:
-        print(f"[reliefweb] fetch failed: {e}", file=sys.stderr)
-    print(f"[reliefweb] fetched {len(jobs)} raw jobs")
+        log(f"[reliefweb] EXCEPTION: {e}")
+        traceback.print_exc()
+
+    log(f"[reliefweb] parsed {len(jobs)} jobs")
     return jobs
 
 # -------------------------------------------------------------
@@ -272,10 +297,10 @@ def filter_with_claude(jobs):
                 if item.get("score", 0) >= MIN_SCORE:
                     matches.append(item)
         except Exception as e:
-            print(f"[filter] batch {i} failed: {e}", file=sys.stderr)
+            log(f"[filter] batch {i} failed: {e}")
             continue
 
-    print(f"[filter] {len(matches)} matches at score >= {MIN_SCORE}")
+    log(f"[filter] {len(matches)} matches at score >= {MIN_SCORE}")
     return matches
 
 # -------------------------------------------------------------
@@ -314,11 +339,13 @@ def send_telegram(job):
 
 
 def send_summary(total_raw, total_new, total_matched):
+    diag_text = "\n".join(DIAGNOSTICS[-10:]) if DIAGNOSTICS else "(no logs)"
     text = (
-        f"Daily scrape - {datetime.utcnow():%Y-%m-%d}\n"
+        f"Daily scrape - {datetime.utcnow():%Y-%m-%d %H:%M} UTC\n"
         f"Scraped: {total_raw}\n"
         f"New (unseen): {total_new}\n"
-        f"Matches (score >= {MIN_SCORE}): {total_matched}"
+        f"Matches (score >= {MIN_SCORE}): {total_matched}\n"
+        f"\nDiagnostics:\n{diag_text}"
     )
     try:
         requests.post(
@@ -335,9 +362,11 @@ def send_summary(total_raw, total_new, total_matched):
 
 def main():
     seen = load_seen()
+    log(f"[main] seen store has {len(seen)} URLs")
+
     raw = scrape_reliefweb()
     new = filter_unseen(raw, seen)
-    print(f"[main] {len(new)} new jobs after dedup")
+    log(f"[main] {len(new)} new jobs after dedup")
 
     matches = filter_with_claude(new)
 
