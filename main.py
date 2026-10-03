@@ -314,6 +314,10 @@ def filter_with_claude(jobs):
             text = msg.content[0].text.strip()
             text = re.sub(r"^```(?:json)?|```$", "", text,
                           flags=re.MULTILINE).strip()
+            # Extract just the JSON array - ignore any text before [ or after ]
+            match = re.search(r"\[.*\]", text, flags=re.DOTALL)
+            if match:
+                text = match.group(0)
             parsed = json.loads(text)
             for item in parsed:
                 if item.get("score", 0) >= MIN_SCORE:
