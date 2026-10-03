@@ -24,6 +24,7 @@ from bs4 import BeautifulSoup
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
+CANDIDATE_PROFILE = os.environ.get("CANDIDATE_PROFILE", "")
 
 MIN_SCORE = 5
 SEEN_FILE = Path("data/seen_jobs.json")
@@ -70,38 +71,15 @@ def log(msg):
 # Filter prompt
 # -------------------------------------------------------------
 
-FILTER_PROMPT = """
-You are a job-search filtering agent for Nargiza Khamidova.
-Your task: given a list of vacancy postings, return ONLY the
-roles that match her profile. Score each match 1-10 and
-include a one-sentence reason.
+FILTER_PROMPT_TEMPLATE = """
+You are a job-search filtering agent. Your task: given a list of
+vacancy postings, return ONLY the roles that match the candidate
+profile below. Score each match 1-10 and include a one-sentence
+reason.
 
 CANDIDATE PROFILE
 
-Current role: Programme Analyst, Inclusive Growth, UNDP
-Uzbekistan (FTA, NOA/7, since Sep 2024). Manages USD 5M+
-annual portfolio.
-
-Experience: 5+ years across UNDP, OSCE, UN DESA, KIPA Seoul,
-East Telecom (national telecommunications operator).
-
-Education: MPP, KDI School of Public Policy and Management
-(Global Korea Scholarship, 2020). BA International Economic
-Relations, UWED Tashkent.
-
-Languages: English (proficient), Russian (proficient),
-Uzbek (native), Korean (professional).
-
-Thematic expertise:
-- Digital economy, digital inclusion, digital public infrastructure
-- Women's economic empowerment, women's entrepreneurship
-- Financial inclusion, inclusive finance
-- Multidimensional poverty measurement (MPI, Alkire-Foster)
-- AI policy, AI regulatory sandboxes, AI ethics
-- Social protection reform
-- Inclusive growth, startup ecosystems
-- MEL, results-based management
-- Data analytics (R, Python, Tableau, Power BI)
+{candidate_profile}
 
 TARGET LEVEL
 - P-2, P-3 (UN grade)
@@ -185,6 +163,11 @@ Each object MUST include ALL fields (use "Not specified" ONLY if truly absent):
 
 Return [] if no matches. Return ONLY the JSON array, no other text.
 """
+
+FILTER_PROMPT = FILTER_PROMPT_TEMPLATE.format(
+    candidate_profile=CANDIDATE_PROFILE or
+    "[No profile configured — set CANDIDATE_PROFILE env var]"
+)
 
 # -------------------------------------------------------------
 # Scraper - UNjobs.org (reliable HTML aggregator)
