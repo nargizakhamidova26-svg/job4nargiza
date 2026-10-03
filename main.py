@@ -15,6 +15,7 @@ from pathlib import Path
 
 import requests
 from anthropic import Anthropic
+from bs4 import BeautifulSoup
 
 # -------------------------------------------------------------
 # Config
@@ -28,13 +29,16 @@ MIN_SCORE = 7
 SEEN_FILE = Path("data/seen_jobs.json")
 MODEL = "claude-haiku-4-5-20251001"
 
-RELIEFWEB_URL = "https://api.reliefweb.int/v2/jobs"
-APP_NAME = "job4nargiza"
+UNJOBS_URL = "https://unjobs.org/new"
 JOBS_PER_FETCH = 100
 
 HEADERS = {
-    "User-Agent": f"{APP_NAME}/1.0",
-    "Accept": "application/json",
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml",
 }
 
 # collect diagnostic messages to send to Telegram at the end
@@ -143,98 +147,101 @@ Return [] if no matches. Return ONLY the JSON array, no other text.
 """
 
 # -------------------------------------------------------------
-# Scraper - ReliefWeb API (POST with JSON body)
+# Scraper - UNjobs.org (reliable HTML aggregator)
 # -------------------------------------------------------------
 
-def scrape_reliefweb():
-    """Pull recent jobs from ReliefWeb API using POST + JSON body."""
+def scrape_unjobs():
+    """Scrape newest listings from UNjobs.org."""
     jobs = []
 
-    body = {
-        "limit": JOBS_PER_FETCH,
-        "sort": ["date.created:desc"],
-        "fields": {
-            "include": [
-                "title",
-                "url",
-                "source.name",
-                "country.name",
-                "city.name",
-                "date.closing",
-                "date.created",
-                "experience.name",
-                "career_categories.name",
-            ]
-        },
-    }
+    # UNjobs paginates: /new, /new/2, /new/3 ...
+    # Each page has ~50 jobs. Pull first 2 pages = ~100 newest.
+    pages = [UNJOBS_URL, f"{UNJOBS_URL}/2"]
 
-    try:
-        resp = requests.post(
-            f"{RELIEFWEB_URL}?appname={APP_NAME}",
-            json=body,
-            headers=HEADERS,
-            timeout=30,
-        )
-        log(f"[reliefweb] HTTP {resp.status_code}")
-
-        if resp.status_code != 200:
-            log(f"[reliefweb] body: {resp.text[:300]}")
-            return jobs
-
-        payload = resp.json()
-        total = payload.get("totalCount", 0)
-        count = payload.get("count", 0)
-        log(f"[reliefweb] API returned count={count} total={total}")
-
-        for item in payload.get("data", []):
-            f = item.get("fields", {})
-
-            title = f.get("title", "").strip()
-            if not title:
+    for page_url in pages:
+        try:
+            resp = requests.get(page_url, headers=HEADERS, timeout=30)
+            log(f"[unjobs] {page_url} HTTP {resp.status_code}")
+            if resp.status_code != 200:
+                log(f"[unjobs] body: {resp.text[:200]}")
                 continue
 
-            orgs = [s.get("name", "") for s in f.get("source", [])]
-            org = ", ".join(orgs)[:120]
+            soup = BeautifulSoup(resp.text, "lxml")
 
-            countries = [c.get("name", "") for c in f.get("country", [])]
-            cities = [c.get("name", "") for c in f.get("city", [])]
-            location = ", ".join(cities + countries)[:120]
+            # UNjobs job cards are <div class="job"> containers
+            cards = soup.select("div.job")
+            if not cards:
+                # fallback: any link to a vacancy page
+                cards = soup.select("a[href*='/vacancies/']")
 
-            deadline = ""
-            date_obj = f.get("date", {})
-            if isinstance(date_obj, dict) and date_obj.get("closing"):
-                deadline = date_obj["closing"][:10]
+            for card in cards:
+                # Title + link
+                link_el = card.find("a", href=True) if card.name == "div" else card
+                if not link_el:
+                    continue
+                href = link_el.get("href", "")
+                if not href:
+                    continue
+                url = href if href.startswith("http") else f"https://unjobs.org{href}"
 
-            experience = ""
-            exp_obj = f.get("experience", [])
-            if exp_obj:
-                experience = ", ".join(e.get("name", "") for e in exp_obj)
+                title = link_el.get_text(strip=True)
+                if not title or len(title) < 5:
+                    continue
 
-            categories = ""
-            cat_obj = f.get("career_categories", [])
-            if cat_obj:
-                categories = ", ".join(c.get("name", "") for c in cat_obj)
+                # Full card text has org, location, deadline inline
+                card_text = card.get_text(" ", strip=True) if card.name == "div" else title
+                card_text = card_text[:400]
 
-            description = (
-                f"Experience: {experience}. "
-                f"Category: {categories}. "
-                f"Location: {location}."
-            )
+                # UNjobs format: "Title | Organization, Location — Deadline"
+                org = ""
+                location = ""
+                deadline = ""
 
-            jobs.append({
-                "title": title,
-                "organization": org,
-                "location": location,
-                "deadline": deadline,
-                "description": description,
-                "url": f.get("url", ""),
-                "source": "reliefweb",
-            })
-    except Exception as e:
-        log(f"[reliefweb] EXCEPTION: {e}")
-        traceback.print_exc()
+                # Try to pull org from <p> or next sibling
+                meta_el = card.find("p") if card.name == "div" else None
+                if meta_el:
+                    meta_text = meta_el.get_text(" ", strip=True)
+                    # Format often: "UNDP, Geneva Switzerland | Closing: 15 Nov 2026"
+                    if "|" in meta_text:
+                        left, right = meta_text.split("|", 1)
+                        if "," in left:
+                            parts = left.split(",", 1)
+                            org = parts[0].strip()
+                            location = parts[1].strip()
+                        else:
+                            org = left.strip()
+                        if "Closing" in right or "Deadline" in right:
+                            deadline = right.replace("Closing:", "").replace("Deadline:", "").strip()
+                        else:
+                            deadline = right.strip()
+                    elif "," in meta_text:
+                        parts = meta_text.split(",", 1)
+                        org = parts[0].strip()
+                        location = parts[1].strip()
+                    else:
+                        org = meta_text
 
-    log(f"[reliefweb] parsed {len(jobs)} jobs")
+                jobs.append({
+                    "title": title,
+                    "organization": org[:120],
+                    "location": location[:120],
+                    "deadline": deadline[:40],
+                    "description": card_text,
+                    "url": url,
+                    "source": "unjobs",
+                })
+
+                if len(jobs) >= JOBS_PER_FETCH:
+                    break
+
+            if len(jobs) >= JOBS_PER_FETCH:
+                break
+
+        except Exception as e:
+            log(f"[unjobs] EXCEPTION on {page_url}: {e}")
+            traceback.print_exc()
+
+    log(f"[unjobs] parsed {len(jobs)} jobs")
     return jobs
 
 # -------------------------------------------------------------
@@ -364,7 +371,7 @@ def main():
     seen = load_seen()
     log(f"[main] seen store has {len(seen)} URLs")
 
-    raw = scrape_reliefweb()
+    raw = scrape_unjobs()
     new = filter_unseen(raw, seen)
     log(f"[main] {len(new)} new jobs after dedup")
 
