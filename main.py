@@ -25,7 +25,7 @@ TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 
-MIN_SCORE = 7
+MIN_SCORE = 5
 SEEN_FILE = Path("data/seen_jobs.json")
 MODEL = "claude-haiku-4-5-20251001"
 
@@ -126,20 +126,32 @@ Score each role 1-10 against:
 4. Contract shape (FTA > TA > IPSA > consultancy)
 5. Visa feasibility for Uzbek national
 
-Score strictly. Most roles should score 3-5. Reserve 7+
-for genuine fits.
+IMPORTANT: These listings come from an aggregator and often
+only include title + organization + location, no description.
+When info is thin, judge on title + organization + location
+alone, and give BENEFIT OF DOUBT for roles that look like
+they could match. Don't downscore just because description
+is short.
+
+- Clear thematic match + acceptable location → score 7-9
+- Right level + right agency + unclear theme → score 5-6
+- Wrong level, wrong location, or clearly off-theme → score 1-4
+
+Return anything scoring 5 or higher.
 
 OUTPUT FORMAT
 
-Return a JSON array of ONLY the matching roles with score >= 7.
-Each object:
+Return a JSON array of ONLY the matching roles with score >= 5.
+Each object MUST include all these fields filled with the best
+extraction from the job text (use "Not specified" if truly absent):
+
 {
-  "title": "...",
-  "organization": "...",
-  "location": "...",
-  "deadline": "...",
+  "title": "position title",
+  "organization": "name of organization (e.g. UNDP, UNICEF, World Bank)",
+  "location": "city, country",
+  "deadline": "closing date",
   "score": N,
-  "reason": "one sentence",
+  "reason": "one sentence why it fits",
   "url": "..."
 }
 
@@ -156,7 +168,7 @@ def scrape_unjobs():
 
     # UNjobs paginates: /new, /new/2, /new/3 ...
     # Each page has ~50 jobs. Pull first 2 pages = ~100 newest.
-    pages = [UNJOBS_URL, f"{UNJOBS_URL}/2"]
+    pages = [UNJOBS_URL, f"{UNJOBS_URL}/2", f"{UNJOBS_URL}/3"]
 
     for page_url in pages:
         try:
@@ -315,20 +327,22 @@ def filter_with_claude(jobs):
 # -------------------------------------------------------------
 
 def send_telegram(job):
-    title = job.get("title", "")
-    org = job.get("organization", "")
-    location = job.get("location", "")
-    deadline = job.get("deadline", "")
+    title = job.get("title", "Not specified")
+    org = job.get("organization", "Not specified")
+    location = job.get("location", "Not specified")
+    deadline = job.get("deadline", "Not specified")
     score = job.get("score", "?")
     reason = job.get("reason", "")
     url = job.get("url", "")
 
     text = (
-        f"Score {score}/10 - {title}\n"
-        f"{org} | {location}\n"
-        f"Deadline: {deadline}\n"
-        f"Why: {reason}\n"
-        f"{url}"
+        f"⭐ Score: {score}/10\n\n"
+        f"Position: {title}\n"
+        f"Organization: {org}\n"
+        f"Location: {location}\n"
+        f"Deadline: {deadline}\n\n"
+        f"Why it fits: {reason}\n\n"
+        f"Link: {url}"
     )
 
     try:
