@@ -30,7 +30,24 @@ SEEN_FILE = Path("data/seen_jobs.json")
 MODEL = "claude-haiku-4-5-20251001"
 
 UNJOBS_URL = "https://unjobs.org/new"
-JOBS_PER_FETCH = 100
+JOBS_PER_FETCH = 150
+
+# Foundation-specific pages on unjobs.org
+FOUNDATION_PAGES = [
+    "https://unjobs.org/organizations/the-mastercard-foundation",
+    "https://unjobs.org/organizations/open-society-foundations",
+    "https://unjobs.org/organizations/aga-khan-foundation",
+    "https://unjobs.org/organizations/ikea-foundation",
+    "https://unjobs.org/organizations/children-s-investment-fund-foundation-ciff",
+    "https://unjobs.org/organizations/ford-foundation",
+    "https://unjobs.org/organizations/rockefeller-foundation",
+    "https://unjobs.org/organizations/bill-melinda-gates-foundation",
+    "https://unjobs.org/organizations/wellcome-trust",
+    "https://unjobs.org/organizations/macarthur-foundation",
+    "https://unjobs.org/organizations/oak-foundation",
+    "https://unjobs.org/organizations/luminate",
+    "https://unjobs.org/organizations/co-impact",
+]
 
 HEADERS = {
     "User-Agent": (
@@ -103,19 +120,24 @@ Asia-Pacific duty stations (Bangkok, Singapore).
 Acceptable: HQ New York / DC roles ONLY if explicitly
 international staff with G-4 visa sponsorship.
 
-EXCLUDE
-- Uzbekistan and Central Asia (current location)
+EXCLUDE (score 1-3 for any of these)
+- NATIONAL positions — National Officer (NO-A, NO-B, NO-C, NO-D),
+  Service Band (SB-3, SB-4, SB-5), National UN Volunteer (NUNV),
+  National Consultant, National Programme Officer, or any role with
+  "National" or "(National)" in the title. She wants INTERNATIONAL only.
+- Uzbekistan, Tajikistan, Kyrgyzstan, Kazakhstan, Turkmenistan,
+  Afghanistan (Central Asia region — she wants OUT)
 - Roles stating "no visa sponsorship" in US/UK
 - Roles requiring African context operational experience
-- Roles requiring 10+ years
-- Director, Head, VP, Chief tier
+- Roles requiring 10+ years experience
+- Director, Head, VP, Chief, Lead tier
 - Pure corporate CSR / brand roles
-- Pure engineering / software developer roles
-- Roles requiring Spanish or French as required language
+- Pure engineering / software developer / IT support roles
+- Roles requiring Spanish or French as REQUIRED language
 - Fundraising-only or communications-only roles
 - Climate science / health science research roles
 - Humanitarian field roles in active conflict zones
-- Driver, admin assistant, support staff roles
+- Driver, admin assistant, finance clerk, procurement assistant, support staff
 
 SCORING RUBRIC
 
@@ -141,15 +163,20 @@ Return anything scoring 5 or higher.
 
 OUTPUT FORMAT
 
+Each input job has: title, raw_text (containing organization, location, grade,
+deadline etc.), url.
+
+EXTRACT the organization, location, and deadline from raw_text yourself.
+UNjobs format usually puts them pipe-separated or comma-separated near the title.
+
 Return a JSON array of ONLY the matching roles with score >= 5.
-Each object MUST include all these fields filled with the best
-extraction from the job text (use "Not specified" if truly absent):
+Each object MUST include ALL fields (use "Not specified" ONLY if truly absent):
 
 {
   "title": "position title",
-  "organization": "name of organization (e.g. UNDP, UNICEF, World Bank)",
+  "organization": "name of organization (e.g. UNDP, UNICEF, Mastercard Foundation)",
   "location": "city, country",
-  "deadline": "closing date",
+  "deadline": "closing date in format DD Mon YYYY if findable",
   "score": N,
   "reason": "one sentence why it fits",
   "url": "..."
@@ -162,98 +189,77 @@ Return [] if no matches. Return ONLY the JSON array, no other text.
 # Scraper - UNjobs.org (reliable HTML aggregator)
 # -------------------------------------------------------------
 
-def scrape_unjobs():
-    """Scrape newest listings from UNjobs.org."""
+def parse_unjobs_page(url, source_label):
+    """Parse a single UNjobs listing page and return list of job dicts."""
     jobs = []
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=30)
+        log(f"[{source_label}] {url} HTTP {resp.status_code}")
+        if resp.status_code != 200:
+            return jobs
 
-    # UNjobs paginates: /new, /new/2, /new/3 ...
-    # Each page has ~50 jobs. Pull first 2 pages = ~100 newest.
-    pages = [UNJOBS_URL, f"{UNJOBS_URL}/2", f"{UNJOBS_URL}/3"]
+        soup = BeautifulSoup(resp.text, "lxml")
+        cards = soup.select("div.job")
+        if not cards:
+            cards = soup.select("article") or soup.select("a[href*='/vacancies/']")
 
-    for page_url in pages:
-        try:
-            resp = requests.get(page_url, headers=HEADERS, timeout=30)
-            log(f"[unjobs] {page_url} HTTP {resp.status_code}")
-            if resp.status_code != 200:
-                log(f"[unjobs] body: {resp.text[:200]}")
+        for card in cards:
+            link_el = card.find("a", href=True) if card.name == "div" else card
+            if not link_el:
+                continue
+            href = link_el.get("href", "")
+            if not href:
+                continue
+            job_url = href if href.startswith("http") else f"https://unjobs.org{href}"
+
+            title = link_el.get_text(strip=True)
+            if not title or len(title) < 5:
                 continue
 
-            soup = BeautifulSoup(resp.text, "lxml")
+            # Capture ALL text from the card - Claude will extract fields
+            card_text = card.get_text(" | ", strip=True) if card.name == "div" else title
+            card_text = card_text[:600]
 
-            # UNjobs job cards are <div class="job"> containers
-            cards = soup.select("div.job")
-            if not cards:
-                # fallback: any link to a vacancy page
-                cards = soup.select("a[href*='/vacancies/']")
+            jobs.append({
+                "title": title,
+                "organization": "",   # Claude extracts from description
+                "location": "",       # Claude extracts
+                "deadline": "",       # Claude extracts
+                "description": card_text,
+                "url": job_url,
+                "source": source_label,
+            })
+    except Exception as e:
+        log(f"[{source_label}] EXCEPTION on {url}: {e}")
+        traceback.print_exc()
+    return jobs
 
-            for card in cards:
-                # Title + link
-                link_el = card.find("a", href=True) if card.name == "div" else card
-                if not link_el:
-                    continue
-                href = link_el.get("href", "")
-                if not href:
-                    continue
-                url = href if href.startswith("http") else f"https://unjobs.org{href}"
 
-                title = link_el.get_text(strip=True)
-                if not title or len(title) < 5:
-                    continue
+def scrape_unjobs():
+    """Scrape UN agency jobs + foundation-specific pages."""
+    jobs = []
 
-                # Full card text has org, location, deadline inline
-                card_text = card.get_text(" ", strip=True) if card.name == "div" else title
-                card_text = card_text[:400]
+    # Main UN jobs feed - 3 pages = ~150 newest
+    for page_url in [UNJOBS_URL, f"{UNJOBS_URL}/2", f"{UNJOBS_URL}/3"]:
+        jobs.extend(parse_unjobs_page(page_url, "unjobs-new"))
+        if len(jobs) >= JOBS_PER_FETCH:
+            break
 
-                # UNjobs format: "Title | Organization, Location — Deadline"
-                org = ""
-                location = ""
-                deadline = ""
+    # Foundation-specific pages - pull all open roles from each
+    foundation_jobs = []
+    for foundation_url in FOUNDATION_PAGES:
+        foundation_jobs.extend(parse_unjobs_page(foundation_url, "unjobs-foundation"))
 
-                # Try to pull org from <p> or next sibling
-                meta_el = card.find("p") if card.name == "div" else None
-                if meta_el:
-                    meta_text = meta_el.get_text(" ", strip=True)
-                    # Format often: "UNDP, Geneva Switzerland | Closing: 15 Nov 2026"
-                    if "|" in meta_text:
-                        left, right = meta_text.split("|", 1)
-                        if "," in left:
-                            parts = left.split(",", 1)
-                            org = parts[0].strip()
-                            location = parts[1].strip()
-                        else:
-                            org = left.strip()
-                        if "Closing" in right or "Deadline" in right:
-                            deadline = right.replace("Closing:", "").replace("Deadline:", "").strip()
-                        else:
-                            deadline = right.strip()
-                    elif "," in meta_text:
-                        parts = meta_text.split(",", 1)
-                        org = parts[0].strip()
-                        location = parts[1].strip()
-                    else:
-                        org = meta_text
+    log(f"[unjobs] main feed: {len(jobs)}, foundations: {len(foundation_jobs)}")
 
-                jobs.append({
-                    "title": title,
-                    "organization": org[:120],
-                    "location": location[:120],
-                    "deadline": deadline[:40],
-                    "description": card_text,
-                    "url": url,
-                    "source": "unjobs",
-                })
+    # Dedupe within this run by URL
+    seen_urls = {j["url"] for j in jobs}
+    for j in foundation_jobs:
+        if j["url"] not in seen_urls:
+            jobs.append(j)
+            seen_urls.add(j["url"])
 
-                if len(jobs) >= JOBS_PER_FETCH:
-                    break
-
-            if len(jobs) >= JOBS_PER_FETCH:
-                break
-
-        except Exception as e:
-            log(f"[unjobs] EXCEPTION on {page_url}: {e}")
-            traceback.print_exc()
-
-    log(f"[unjobs] parsed {len(jobs)} jobs")
+    log(f"[unjobs] total unique: {len(jobs)}")
     return jobs
 
 # -------------------------------------------------------------
@@ -290,10 +296,7 @@ def filter_with_claude(jobs):
         payload = json.dumps(
             [{
                 "title": j["title"],
-                "organization": j.get("organization", ""),
-                "location": j.get("location", ""),
-                "deadline": j.get("deadline", ""),
-                "description": j.get("description", "")[:600],
+                "raw_text": j.get("description", "")[:600],
                 "url": j["url"],
             } for j in batch],
             ensure_ascii=False,
